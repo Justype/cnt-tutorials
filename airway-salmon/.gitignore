@@ -1,0 +1,6 @@
+# Ignore R project files
+.Rprofile
+*Rproj
+
+# Ignore the Quarto output
+*html

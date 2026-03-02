@@ -1,0 +1,7 @@
+name: r-collect
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bioconductor-tximport=1.38.2
+  - r-readr=2.2.0

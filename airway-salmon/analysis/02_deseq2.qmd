@@ -1,0 +1,113 @@
+---
+title: "Airway RNA-seq: DESeq2 Differential Expression"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    toc: true
+---
+
+```{r setup, include=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(org.Hs.eg.db)
+```
+
+## Setup
+
+```{r load}
+txi <- readRDS("../results/txi_gene.rds")
+
+# coldata: SRR | condition | cell_line
+coldata <- read.table("../metadata/samples.txt", header = FALSE,
+                      col.names = c("srr", "condition", "cell_line"))
+rownames(coldata) <- coldata$srr
+coldata$condition <- factor(coldata$condition, levels = c("untreated", "dexamethasone"))
+coldata$cell_line <- factor(coldata$cell_line)
+
+# Align sample order
+coldata <- coldata[colnames(txi$counts), ]
+```
+
+```{r deseq2}
+# Paired design: block by cell_line, test condition
+dds <- DESeqDataSetFromTximport(txi, colData = coldata, design = ~ cell_line + condition)
+dds <- dds[rowSums(counts(dds) >= 10) >= 3, ]   # pre-filter low-count genes
+dds <- DESeq(dds)
+
+message(sprintf("%d genes after filtering", nrow(dds)))
+```
+
+## PCA
+
+```{r pca}
+vsd <- vst(dds, blind = TRUE)
+pca <- plotPCA(vsd, intgroup = c("condition", "cell_line"), returnData = TRUE)
+pct <- round(100 * attr(pca, "percentVar"))
+
+ggplot(pca, aes(PC1, PC2, colour = condition, shape = cell_line, label = name)) +
+    geom_point(size = 4) +
+    geom_text_repel(size = 3) +
+    scale_colour_manual(values = c(untreated = "steelblue", albuterol = "tomato")) +
+    labs(x = paste0("PC1: ", pct[1], "% variance"),
+         y = paste0("PC2: ", pct[2], "% variance"),
+         title = "PCA — VST-normalised counts") +
+    theme_bw()
+```
+
+## Differential Expression: dexamethasone vs untreated
+
+```{r results}
+res <- results(dds, contrast = c("condition", "dexamethasone", "untreated"),
+               alpha = 0.05)
+summary(res)
+
+res_df <- as.data.frame(res) |>
+    tibble::rownames_to_column("gene_id") |>
+    filter(!is.na(padj)) |>
+    mutate(sig = case_when(
+        padj < 0.05 & log2FoldChange >  1 ~ "up",
+        padj < 0.05 & log2FoldChange < -1 ~ "down",
+        TRUE ~ "ns"
+    ))
+
+sym <- AnnotationDbi::mapIds(org.Hs.eg.db,
+    keys      = sub("\\..*", "", res_df$gene_id),
+    column    = "SYMBOL",
+    keytype   = "ENSEMBL",
+    multiVals = "first")
+res_df$gene_name <- ifelse(is.na(sym), res_df$gene_id, sym)
+```
+
+## Volcano Plot
+
+```{r volcano}
+top_labels <- res_df |>
+    filter(sig != "ns") |>
+    slice_min(padj, n = 20)
+
+ggplot(res_df, aes(log2FoldChange, -log10(padj), colour = sig)) +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_text_repel(data = top_labels, aes(label = gene_name), size = 2.5, max.overlaps = 20) +
+    scale_colour_manual(values = c(up = "tomato", down = "steelblue", ns = "grey70")) +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    labs(title = "Dexamethasone vs Untreated",
+         x = "log2 fold change", y = "-log10 adjusted p-value") +
+    theme_bw() +
+    theme(legend.title = element_blank())
+```
+
+## Top DE Genes
+
+```{r top-table}
+res_df |>
+    filter(sig != "ns") |>
+    arrange(padj) |>
+    head(20) |>
+    mutate(across(where(is.numeric), \(x) round(x, 4))) |>
+    dplyr::select(gene_name, gene_id, everything()) |>
+    knitr::kable()
+```

@@ -1,0 +1,302 @@
+---
+title: "Airway RNA-seq: QC Summary"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    toc: true
+---
+
+```{r setup, include=FALSE}
+library(jsonlite)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(fastqcr)
+```
+
+```{r load}
+srr <- read.table("../metadata/samples.txt", header = FALSE)[[1]]
+
+# fastp QC
+fastp <- lapply(setNames(srr, srr), function(s) {
+    fromJSON(file.path("../data/fastq-trimmed", paste0(s, ".json")))
+})
+
+# Salmon mapping stats
+salmon <- lapply(setNames(srr, srr), function(s) {
+    fromJSON(file.path("../data/quants", s, "aux_info/meta_info.json"))
+})
+```
+
+## FastQC
+
+```{r fastqc, message=FALSE}
+qc_raw     <- qc_aggregate("../data/fastq/",         progressbar = FALSE)
+qc_trimmed <- qc_aggregate("../data/fastq-trimmed/", progressbar = FALSE)
+
+qc_raw$stage     <- "raw"
+qc_trimmed$stage <- "trimmed"
+qc_all <- bind_rows(qc_raw, qc_trimmed) |>
+    mutate(stage = factor(stage, levels = c("raw", "trimmed")))
+
+# Create sample names for paired-end reads
+srr_paired <- as.vector(outer(srr, c("_1", "_2"), paste0))
+```
+
+```{r fastqc-plot}
+ggplot(qc_all, aes(x = sample, y = pct.gc, fill = stage)) +
+    geom_col(position = "dodge") +
+    labs(y = "% GC", title = "GC content before and after trimming") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r fastqc-status}
+# 1. Assign the problem summaries to objects
+problems_raw     <- qc_problems(qc_raw)
+problems_trimmed <- qc_problems(qc_trimmed)
+
+# 2. Join them by 'sample'
+problems_joined <- full_join(
+    problems_raw, 
+    problems_trimmed, 
+    by = "sample", 
+    suffix = c("_raw", "_trimmed") # Adds these tags to the column names
+  )
+
+# 3. Create a single, unified table
+problems_joined |>
+  knitr::kable(caption = "FastQC problems: Raw vs Trimmed")
+```
+
+```{r fastqc-base-quality, message=FALSE}
+zip_trimmed <- list.files("../data/fastq-trimmed", pattern = "_fastqc.zip$",
+                          full.names = TRUE)
+
+pbq_df <- bind_rows(lapply(zip_trimmed, function(f) {
+    nm <- sub("_fastqc.zip$", "", basename(f))
+    qc_read(f)$per_base_sequence_quality |>
+        mutate(
+            sample = sub("_(1|2)$", "", nm),
+            read   = sub(".*_(\\d+)$", "R\\1", nm),
+            pos    = as.numeric(sub("-.*", "", Base))
+        )
+}))
+
+ggplot(pbq_df, aes(x = pos, y = sample, fill = Mean)) +
+    geom_tile() +
+    scale_fill_gradientn(
+        colours = c("red", "orange", "grey20"),
+        values  = scales::rescale(c(20, 28, 41)),
+        limits  = c(20, 41),
+        oob     = scales::squish
+    ) +
+    facet_wrap(~read, ncol = 1) +
+    labs(x = "Position (bp)", y = NULL, fill = "Mean Q",
+         title = "Per-base mean quality (trimmed reads)") +
+    theme_bw()
+```
+
+```{r fastqc-length, message=FALSE}
+len_df <- bind_rows(lapply(zip_trimmed, function(f) {
+    nm <- sub("_fastqc.zip$", "", basename(f))
+    qc_read(f)$sequence_length_distribution |>
+        mutate(
+            sample = sub("_(1|2)$", "", nm),
+            read   = sub(".*_(\\d+)$", "R\\1", nm),
+            Length = as.numeric(sub("-.*", "", Length))
+        )
+}))
+
+ggplot(len_df, aes(x = Length, y = Count / 1e6, colour = sample, linetype = read)) +
+    geom_line() +
+    labs(x = "Read length (bp)", y = "Count (millions)", colour = "Sample", linetype = "Read",
+         title = "Sequence length distribution (trimmed reads)") +
+    theme_bw()
+```
+
+## Trimming (fastp)
+
+```{r fastp-table}
+fastp_df <- bind_rows(lapply(srr, function(s) {
+    bf <- fastp[[s]]$summary$before_filtering
+    af <- fastp[[s]]$summary$after_filtering
+    fr <- fastp[[s]]$filtering_result
+    data.frame(
+        SRR            = s,
+        reads_in       = bf$total_reads,
+        reads_out      = af$total_reads,
+        pct_kept       = round(af$total_reads / bf$total_reads * 100, 1),
+        q30_before     = round(bf$q30_rate * 100, 1),
+        q30_after      = round(af$q30_rate * 100, 1)
+    )
+}))
+
+knitr::kable(fastp_df,
+    col.names = c("SRR", "Reads in", "Reads out", "% kept", "Q30 before (%)", "Q30 after (%)"),
+    format.args = list(big.mark = ","))
+```
+
+```{r fastp-plot}
+ggplot(fastp_df, aes(x = SRR)) +
+    geom_col(aes(y = reads_in / 1e6, fill = "Before"), alpha = 0.4, position = "identity") +
+    geom_col(aes(y = reads_out / 1e6, fill = "After"), position = "identity") +
+    scale_fill_manual(values = c(Before = "steelblue", After = "steelblue")) +
+    labs(y = "Read pairs (millions)", title = "Reads before and after trimming") +
+    theme_bw() +
+    theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r fastp-q30-plot}
+fastp_df |>
+    select(SRR, q30_before, q30_after) |>
+    pivot_longer(-SRR, names_to = "stage", values_to = "q30") |>
+    mutate(stage = factor(sub("q30_", "", stage), levels = c("before", "after"))) |>
+    ggplot(aes(x = SRR, y = q30, fill = stage)) +
+    geom_col(position = "dodge") +
+    geom_hline(yintercept = 80, linetype = "dashed", colour = "red") +
+    scale_fill_manual(values = c(before = "steelblue", after = "tomato")) +
+    ylim(0, 100) +
+    labs(y = "Q30 rate (%)", fill = "Stage", title = "Q30 rate before and after trimming") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Duplication & Filtering
+
+```{r fastp-dup}
+fastp_dup_df <- bind_rows(lapply(srr, function(s) {
+    data.frame(
+        SRR      = s,
+        dup_rate = round(fastp[[s]]$duplication$rate * 100, 1),
+        ins_peak = fastp[[s]]$insert_size$peak
+    )
+}))
+
+knitr::kable(fastp_dup_df,
+    col.names = c("SRR", "Duplication rate (%)", "Insert size peak (bp)"),
+    caption   = "Duplication rate and insert size peak (fastp)")
+```
+
+```{r fastp-dup-plot}
+ggplot(fastp_dup_df, aes(x = SRR, y = dup_rate)) +
+    geom_col(fill = "darkorange") +
+    geom_hline(yintercept = 30, linetype = "dashed", colour = "red") +
+    ylim(0, 100) +
+    labs(y = "Duplication rate (%)", title = "Read duplication rate (fastp)") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r fastp-filter-breakdown}
+bind_rows(lapply(srr, function(s) {
+    fr <- fastp[[s]]$filtering_result
+    data.frame(
+        SRR       = s,
+        Passed    = fr$passed_filter_reads,
+        Low_Q     = fr$low_quality_reads,
+        Too_Short = fr$too_short_reads,
+        Many_N    = fr$too_many_N_reads
+    )
+})) |>
+    pivot_longer(-SRR, names_to = "category", values_to = "reads") |>
+    mutate(category = factor(category,
+           levels = c("Passed", "Low_Q", "Too_Short", "Many_N"))) |>
+    ggplot(aes(x = SRR, y = reads / 1e6, fill = category)) +
+    geom_col() +
+    scale_fill_manual(
+        values = c(Passed = "seagreen", Low_Q = "tomato",
+                   Too_Short = "orange", Many_N = "mediumpurple"),
+        labels = c(Passed = "Passed", Low_Q = "Low quality",
+                   Too_Short = "Too short", Many_N = "Too many N")) +
+    labs(y = "Reads (millions)", fill = "Category",
+         title = "Read filtering breakdown (fastp)") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Salmon Mapping Rate
+
+```{r salmon-table}
+salmon_df <- bind_rows(lapply(srr, function(s) {
+    m <- salmon[[s]]
+    data.frame(
+        SRR            = s,
+        reads_in       = m$num_processed,
+        reads_mapped   = m$num_mapped,
+        pct_mapped     = round(m$percent_mapped, 1),
+        frag_len_mean  = round(m$frag_length_mean, 0),
+        frag_len_sd    = round(m$frag_length_sd, 0)
+    )
+}))
+
+knitr::kable(salmon_df,
+    col.names = c("SRR", "Reads processed", "Reads mapped", "% mapped",
+                  "Mean frag len", "SD frag len"),
+    format.args = list(big.mark = ","))
+```
+
+```{r salmon-plot}
+ggplot(salmon_df, aes(x = SRR, y = pct_mapped)) +
+    geom_col(fill = "seagreen") +
+    geom_hline(yintercept = 80, linetype = "dashed", colour = "red") +
+    ylim(0, 100) +
+    labs(y = "% mapped", title = "Salmon mapping rate") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r salmon-filter-detail}
+# Breakdown of why fragments were not counted as mapped
+bind_rows(lapply(srr, function(s) {
+    m <- salmon[[s]]
+    total <- m$num_processed
+    data.frame(
+        SRR           = s,
+        Mapped        = m$num_mapped,
+        Decoy         = m$num_decoy_fragments,
+        Dovetail      = m$num_dovetail_fragments,
+        Below_Thresh  = m$num_fragments_filtered_vm
+    )
+})) |>
+    pivot_longer(-SRR, names_to = "category", values_to = "fragments") |>
+    mutate(category = factor(category,
+           levels = c("Mapped", "Below_Thresh", "Dovetail", "Decoy"))) |>
+    ggplot(aes(x = SRR, y = fragments / 1e6, fill = category)) +
+    geom_col() +
+    scale_fill_manual(
+        values = c(Mapped = "seagreen", Below_Thresh = "tomato",
+                   Dovetail = "orange", Decoy = "mediumpurple"),
+        labels = c(Mapped = "Mapped", Below_Thresh = "Below threshold",
+                   Dovetail = "Dovetail", Decoy = "Decoy hit")) +
+    labs(y = "Fragments (millions)", fill = "Category",
+         title = "Salmon fragment disposition") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## QC Summary
+
+```{r qc-summary}
+flag <- function(x, pass_if) ifelse(pass_if, "PASS", "WARN")
+
+qc_summary <- data.frame(
+    SRR        = fastp_df$SRR,
+    pct_kept   = fastp_df$pct_kept,
+    q30_after  = fastp_df$q30_after,
+    dup_rate   = fastp_dup_df$dup_rate,
+    pct_mapped = salmon_df$pct_mapped
+) |>
+    mutate(
+        flag_trimming = flag(pct_kept,   pct_kept   >= 80),
+        flag_q30      = flag(q30_after,  q30_after  >= 80),
+        flag_dup      = flag(dup_rate,   dup_rate   <= 30),
+        flag_mapping  = flag(pct_mapped, pct_mapped >= 75)
+    )
+
+knitr::kable(qc_summary,
+    col.names = c("SRR", "% Kept", "Q30 After (%)", "Dup Rate (%)", "% Mapped",
+                  "Trimming", "Q30", "Duplication", "Mapping"),
+    caption = "QC summary — thresholds: kept ≥ 80%, Q30 ≥ 80%, dup ≤ 30%, mapped ≥ 75%")
+```

@@ -1,0 +1,18 @@
+# Ignore CondaTainer overlay files
+*.sqf
+*.img
+
+# Ignore temporary files and logs
+tmp
+log
+logs
+
+# Ignore output directories
+data
+fastq
+fastq-trimmed
+quants
+results
+
+# Ignore RStudio project files
+.Rproj.user
