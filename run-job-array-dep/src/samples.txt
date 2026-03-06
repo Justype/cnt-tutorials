@@ -1,0 +1,3 @@
+sampleA Apple
+sampleB Banana
+sampleC Cherry
