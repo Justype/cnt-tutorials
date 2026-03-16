@@ -13,7 +13,7 @@ For simplicity, we only use 6 paired samples — 3 cell lines × 2 conditions (u
 Install required overlays (checks for existing ones, only installs missing):
 
 ```bash
-bash src/setup.sh
+condatainer check src -a
 ```
 
 ## Project Layout

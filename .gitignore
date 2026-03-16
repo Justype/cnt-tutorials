@@ -2,10 +2,17 @@
 *.sqf
 *.img
 
+# Ignore backup files
+*.bak
+
 # Ignore temporary files and logs
 tmp
 log
 logs
+*.tmp
+*.log
+*.out
+*.err
 
 # Ignore output directories
 data
